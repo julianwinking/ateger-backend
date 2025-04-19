@@ -36,3 +36,6 @@ class TeaserResponse(TeaserBase):
 
 class TeaserList(BaseModel):
     teasers: List[TeaserResponse]
+
+class TeaserProcessRequest(BaseModel):
+    building_blocks: List[str]

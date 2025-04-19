@@ -157,6 +157,35 @@ async def delete_teaser(teaser_id: int, db: Session = Depends(get_db)):
     
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+@app.post("/teasers/{teaser_id}/process", response_model=schemas.TeaserResponse)
+async def process_teaser(
+    teaser_id: int,
+    process_request: schemas.TeaserProcessRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Start processing a teaser with selected building blocks.
+    """
+    teaser = db.query(models.Teaser).filter(models.Teaser.id == teaser_id).first()
+    if teaser is None:
+        raise HTTPException(status_code=404, detail="Teaser not found")
+    
+    # Check if teaser is already being processed
+    if teaser.status == models.TeaserStatus.PROCESSING:
+        raise HTTPException(status_code=400, detail="Teaser is already being processed")
+    
+    # Update teaser status to PROCESSING
+    teaser.status = models.TeaserStatus.PROCESSING
+    db.commit()
+    db.refresh(teaser)
+    
+    # Start the pipeline processing with selected building blocks
+    pipeline = TeaserProcessingPipeline(db, nlp_processor)
+    background_tasks.add_task(pipeline.process, teaser_id, process_request.building_blocks)
+    
+    return teaser
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
