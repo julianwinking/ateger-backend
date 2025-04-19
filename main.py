@@ -84,10 +84,10 @@ async def upload_teaser(
     # Read file content
     file_content = await file.read()
     
-    # Create a placeholder teaser in the database
+    # Create a teaser in the database with processing status
     db_teaser = models.Teaser(
         filename=file.filename,
-        status=TeaserStatus.PENDING
+        status=TeaserStatus.PROCESSING
     )
     db.add(db_teaser)
     db.commit()
@@ -171,9 +171,9 @@ async def process_teaser(
     if teaser is None:
         raise HTTPException(status_code=404, detail="Teaser not found")
     
-    # Check if teaser is already being processed
+    # Check if teaser is already being processed - return success instead of error
     if teaser.status == models.TeaserStatus.PROCESSING:
-        raise HTTPException(status_code=400, detail="Teaser is already being processed")
+        return teaser
     
     # Update teaser status to PROCESSING
     teaser.status = models.TeaserStatus.PROCESSING
@@ -183,6 +183,31 @@ async def process_teaser(
     # Start the pipeline processing with selected building blocks
     pipeline = TeaserProcessingPipeline(db, nlp_processor)
     background_tasks.add_task(pipeline.process, teaser_id, process_request.building_blocks)
+    
+    return teaser
+
+@app.post("/teasers/{teaser_id}/cancel", response_model=schemas.TeaserResponse)
+async def cancel_teaser_processing(
+    teaser_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Cancel processing of a teaser.
+    """
+    teaser = db.query(models.Teaser).filter(models.Teaser.id == teaser_id).first()
+    if teaser is None:
+        raise HTTPException(status_code=404, detail="Teaser not found")
+    
+    # Can only cancel if teaser is currently processing
+    if teaser.status != models.TeaserStatus.PROCESSING:
+        raise HTTPException(status_code=400, detail="Only processing teasers can be canceled")
+    
+    # Update teaser status to ERROR
+    teaser.status = models.TeaserStatus.ERROR
+    db.commit()
+    db.refresh(teaser)
+    
+    print(f"Processing canceled for teaser {teaser_id}")
     
     return teaser
 

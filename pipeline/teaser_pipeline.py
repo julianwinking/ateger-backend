@@ -138,16 +138,41 @@ class TeaserProcessingPipeline(Pipeline):
                 teaser.entities = self.nlp_processor.extract_entities(teaser.extracted_text)
                 self.db.commit()
                 
-            # Initialize the GPT analysis dictionary if it doesn't exist
+            # Initialize the GPT analysis dictionary with proper nested structure
             if not hasattr(teaser, 'gpt_analysis') or teaser.gpt_analysis is None:
                 teaser.gpt_analysis = {
-                    "Teaser Summary": {},
-                    "Outside-In View": {
-                        "Core Status Quo": {},
-                        "Future": {},
-                        "Shareholder Friendliness": {}
+                    "Teaser Summary": {
+                        "Bias conscious": {}
                     },
-                    "Context Basis": {}
+                    "Outside-In View": {
+                        "Core Status Quo": {
+                            "Company Profile": {},
+                            "Customer & Demand Analysis": {},
+                            "Industry & Competitive Landscape": {},
+                            "Commercial Strategy": {},
+                            "Talent Development": {}
+                        },
+                        "Future": {
+                            "Market Growth and Trends": {},
+                            "Breadth Analysis": {},
+                            "Forces Analysis": {},
+                            "Moat Identification": {},
+                            "Key Value Creation Drivers & Risks": {}
+                        },
+                        "Shareholder Friendliness": {
+                            "Compensation & Ownership Structure": {},
+                            "Related-party transactions": {},
+                            "Share repurchases": {},
+                            "Dividends": {}
+                        }
+                    },
+                    "Context Basis": {
+                        "Risk": {},
+                        "Synergies": {},
+                        "Investment Criteria": {},
+                        "Exit perspective": {},
+                        "Graveyard": {}
+                    }
                 }
             
             # Process only if we have text and an API key
@@ -190,53 +215,43 @@ class TeaserProcessingPipeline(Pipeline):
                     "graveyard": ("Context Basis", "Graveyard")
                 }
                 
-                # Track rate limit status
-                rate_limit_wait_time = 0
-                
-                # Process each selected block with an individual ChatGPT prompt
-                for block_id in blocks_to_process:
-                    if block_id not in self.building_blocks:
-                        print(f"Warning: Unknown building block '{block_id}', skipping")
-                        continue
-                        
-                    print(f"Processing building block: {self.building_blocks[block_id]['name']}")
-                    
-                    # Wait if we encountered a rate limit previously
-                    if rate_limit_wait_time > 0:
-                        print(f"Waiting for {rate_limit_wait_time} seconds due to rate limit...")
-                        await asyncio.sleep(rate_limit_wait_time)
-                        rate_limit_wait_time = 0
-                    
-                    # Generate focused prompt for this specific block
-                    result, wait_time = await self._analyze_block_with_gpt(
+                # Only process blocks that exist in building_blocks
+                valid_blocks = [block_id for block_id in blocks_to_process if block_id in self.building_blocks]
+                if valid_blocks:
+                    # Process all blocks in batched mode to save tokens
+                    batch_results = await self._analyze_multiple_blocks_with_gpt(
                         text=teaser.extracted_text,
-                        block_id=block_id,
-                        block_name=self.building_blocks[block_id]['name'],
-                        block_description=self.building_blocks[block_id]['description']
+                        blocks_to_process=[
+                            (block_id, 
+                             self.building_blocks[block_id]['name'], 
+                             self.building_blocks[block_id]['description'])
+                            for block_id in valid_blocks
+                        ]
                     )
                     
-                    # Update rate limit wait time if needed
-                    if wait_time > 0:
-                        rate_limit_wait_time = wait_time + 1  # Add a small buffer
-                    
-                    if result:
-                        # Store the result in the appropriate location in the MECE structure
-                        section_path = section_mapping.get(block_id)
-                        if section_path:
-                            # Navigate to the correct nested dictionary and update it
-                            current = teaser.gpt_analysis
-                            for i, key in enumerate(section_path):
-                                if i < len(section_path) - 1:
-                                    if key not in current:
-                                        current[key] = {}
-                                    current = current[key]
-                                else:
-                                    current[key] = result
-                                    
+                    # Store the results in the appropriate locations
+                    for block_id, result in batch_results.items():
+                        if result:
+                            section_path = section_mapping.get(block_id)
+                            if section_path:
+                                # Navigate to the correct nested dictionary and update it
+                                current = teaser.gpt_analysis
+                                for i, key in enumerate(section_path):
+                                    if i < len(section_path) - 1:
+                                        if key not in current:
+                                            current[key] = {}
+                                        current = current[key]
+                                    else:
+                                        # Store the analysis content directly
+                                        if isinstance(current, dict):
+                                            current[key] = result
+                                        else:
+                                            print(f"Warning: Cannot store result for {key} - parent is not a dict")
+                                
                             # Save progress after each successful block analysis
                             self.db.commit()
-                    else:
-                        print(f"Failed to analyze block {block_id}")
+                        else:
+                            print(f"Failed to analyze block {block_id}")
                 
                 # Save the updated gpt_analysis to the database
                 self.db.commit()
@@ -272,108 +287,355 @@ class TeaserProcessingPipeline(Pipeline):
                 pass
             return False
 
-    async def _analyze_block_with_gpt(self, text: str, block_id: str, block_name: str, block_description: str) -> tuple[Optional[str], float]:
+    async def _analyze_multiple_blocks_with_gpt(self, text: str, blocks_to_process: List[tuple]) -> Dict[str, str]:
         """
-        Analyze a specific section of the teaser using GPT
+        Analyze multiple sections of the teaser using GPT with a shared context
+        to optimize token usage by sending the teaser content only once.
         
         Args:
-            text: The teaser text to analyze
-            block_id: The ID of the building block
-            block_name: The name of the building block
-            block_description: The description of what this block should contain
-        
+            text: The teaser text to analyze (sent only once)
+            blocks_to_process: List of tuples containing (block_id, block_name, block_description)
+            
         Returns:
-            Tuple[Optional[str], float]: The analysis result and wait time if rate limited (0 if no wait needed)
+            Dict[str, str]: Dictionary mapping block_ids to their analysis results
         """
-        if not self.openai_api_key:
-            return None, 0
+        if not self.openai_api_key or not blocks_to_process:
+            return {}
 
+        results = {}
         try:
-            # Create a focused prompt for this specific section
-            prompt = f"""
-            You are a private equity expert analyzing a teaser document.
-            
-            Focus ONLY on the following section:
-            
-            {block_name}: {block_description}
-            
-            Based on the teaser document below, provide a detailed analysis for ONLY this section.
-            Be specific and thorough in your analysis, focusing exclusively on the aspects mentioned in the description.
-            If information for this section is not available in the document, indicate this with "Information not available in the teaser."
-            
-            Output your response as plain text without any formatting.
-            
-            Teaser Document:
-            {text}
-            """
+            # Create a comprehensive prompt that includes all sections to analyze
+            # but sends the teaser text only once
+            system_prompt = """Context: You are tasked with analyzing a private equity teaser document, focusing on specific sections that require detailed examination to inform investment decisions.
 
-            # Call the OpenAI API
+            Role: Act as a private equity expert with extensive knowledge of investment strategies, market trends, and financial metrics.
+
+            Audience: Investors, analysts, or stakeholders interested in understanding the detailed components of a private equity opportunity.
+
+            Task: For each section of the teaser document you provide, deliver a thorough analysis that explores the implications, strengths, weaknesses, and any missing information. If any section lacks relevant details, clearly indicate that.
+
+            Visualization or output format: Text format, structured by sections for clarity.
+
+            Format your response precisely as follows:
+
+            ---SECTION: [Section Name]---
+
+            [Your analysis for this section]
+
+            ---SECTION: [Next Section Name]---
+
+            [Your analysis for next section]
+
+            And so on for each section requested.
+            """
+            
+            # First message contains just the teaser text to establish context
+            initial_message = f"""Here is the teaser document to analyze:
+
+{text}
+
+I'll now ask you to analyze specific sections of this document one by one.
+            """
+            
+            # Second message contains the sections to analyze
+            sections_message = "Please analyze the following sections:\n\n"
+            for i, (block_id, block_name, block_description) in enumerate(blocks_to_process):
+                sections_message += f"{i+1}. {block_name}: {block_description}\n"
+            
+            # Prepare API call
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.openai_api_key}"
             }
             
             payload = {
-                "model": "gpt-4-turbo", # Using the latest available model
+                "model": "gpt-4-turbo",
                 "messages": [
-                    {"role": "system", "content": "You are a private equity expert analyzing teaser documents."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": initial_message},
+                    {"role": "user", "content": sections_message}
                 ],
-                "temperature": 0.2, # Lower temperature for more consistent, analytical output
-                "max_tokens": 1500 # Enough tokens for a detailed section analysis
+                "temperature": 0.2,
+                # Increase max tokens to accommodate multiple analyses
+                "max_tokens": min(4000, 1000 + (len(blocks_to_process) * 500))
             }
             
-            print(f"Analyzing {block_name} with GPT...")
+            print(f"Sending batched analysis request for {len(blocks_to_process)} sections...")
             
+            # Call the OpenAI API
             async with aiohttp.ClientSession() as session:
                 try:
                     async with session.post(
-                        "https://api.openai.com/v1/chat/completions", 
-                        headers=headers, 
+                        "https://api.openai.com/v1/chat/completions",
+                        headers=headers,
                         json=payload,
-                        timeout=60  # Add a timeout of 60 seconds
+                        timeout=120  # Increased timeout for batch processing
                     ) as response:
                         if response.status != 200:
                             error_text = await response.text()
-                            print(f"Error from OpenAI API for {block_name}: Status {response.status}, Response: {error_text}")
+                            print(f"Error from OpenAI API for batched analysis: Status {response.status}, Response: {error_text}")
+                            return {}
                             
-                            # Check for rate limit errors
-                            try:
-                                error_data = json.loads(error_text)
-                                if response.status == 429 and "error" in error_data:
-                                    error_msg = error_data["error"].get("message", "")
-                                    # Extract wait time from error message
-                                    if "try again in" in error_msg:
-                                        # Extract the wait time from "Please try again in X.XXXs"
-                                        wait_time_str = error_msg.split("try again in")[1].split("s.")[0].strip()
-                                        try:
-                                            wait_time = float(wait_time_str)
-                                            return None, wait_time
-                                        except ValueError:
-                                            # If we can't parse the wait time, use a default
-                                            return None, 15.0
-                            except:
-                                pass
-                            
-                            return None, 0
-                        
                         response_data = await response.json()
-                
+                        
                 except aiohttp.ClientError as e:
-                    print(f"Network error when calling OpenAI API for {block_name}: {str(e)}")
-                    return None, 0
+                    print(f"Network error when calling OpenAI API for batched analysis: {str(e)}")
+                    return {}
                 except Exception as e:
-                    print(f"Unexpected error in API call for {block_name}: {str(e)}")
-                    return None, 0
-                    
-            # Extract the text response from the API
-            gpt_response = response_data['choices'][0]['message']['content']
-            print(f"Successfully analyzed {block_name} section")
+                    print(f"Unexpected error in API call for batched analysis: {str(e)}")
+                    return {}
             
-            return gpt_response.strip(), 0
+            # Extract and parse the response
+            full_response = response_data['choices'][0]['message']['content']
+            
+            # Parse the sections from the response
+            for i, (block_id, block_name, block_description) in enumerate(blocks_to_process):
+                # Look for the section marker
+                section_marker = f"---SECTION: {block_name}---"
+                alt_section_marker = f"SECTION: {block_name}"
                 
+                # Try to find either marker format
+                start_idx = full_response.find(section_marker)
+                if start_idx == -1:
+                    start_idx = full_response.find(alt_section_marker)
+                    if start_idx != -1:
+                        # Account for different marker length
+                        start_idx += len(alt_section_marker)
+                    else:
+                        # Try more flexible matching
+                        for marker in [f"Section: {block_name}", block_name + ":", f"{i+1}. {block_name}"]:
+                            start_idx = full_response.find(marker)
+                            if start_idx != -1:
+                                start_idx += len(marker)
+                                break
+                else:
+                    start_idx += len(section_marker)
+                
+                if start_idx == -1:
+                    print(f"Could not find section for {block_name} in the response")
+                    continue
+                
+                # Find the end of this section (start of next section or end of response)
+                end_idx = -1
+                for next_block_id, next_block_name, _ in blocks_to_process[i+1:]:
+                    for marker in [f"---SECTION: {next_block_name}---", f"SECTION: {next_block_name}",
+                                 f"Section: {next_block_name}", next_block_name + ":"]:
+                        end_idx = full_response.find(marker, start_idx)
+                        if end_idx != -1:
+                            break
+                    if end_idx != -1:
+                        break
+                
+                # Extract section content
+                if end_idx != -1:
+                    section_content = full_response[start_idx:end_idx].strip()
+                else:
+                    section_content = full_response[start_idx:].strip()
+                
+                results[block_id] = section_content
+                print(f"Successfully extracted analysis for {block_name}")
+            
+            return results
+            
         except Exception as e:
-            print(f"Error in GPT analysis for {block_name}: {str(e)}")
+            print(f"Error in batch GPT analysis: {str(e)}")
             import traceback
             traceback.print_exc()
-            return None, 0
+            return results
+            
+    async def _generate_report(self, teaser_id: int) -> Optional[str]:
+        """
+        Generate a PDF report from the teaser GPT analysis
+        
+        Args:
+            teaser_id: The ID of the teaser to create a report for
+            
+        Returns:
+            str: Path to the generated report file, or None if generation failed
+        """
+        try:
+            # Fetch the teaser from the database
+            teaser = self.db.query(Teaser).filter(Teaser.id == teaser_id).first()
+            if not teaser:
+                print(f"Teaser with ID {teaser_id} not found")
+                return None
+                
+            # If we don't have GPT analysis, we can't generate a report
+            if not teaser.gpt_analysis:
+                print(f"No GPT analysis available for teaser {teaser_id}")
+                return None
+            
+            # Print debug information about the structure
+            print(f"Generating report for teaser {teaser_id} with analysis structure:")
+            print(f"GPT analysis keys: {list(teaser.gpt_analysis.keys())}")
+            for section_name, section_data in teaser.gpt_analysis.items():
+                print(f"  Section: {section_name}")
+                if isinstance(section_data, dict):
+                    for subsection_name, subsection_data in section_data.items():
+                        print(f"    Subsection: {subsection_name}")
+                        if isinstance(subsection_data, dict):
+                            print(f"      Contains {len(subsection_data)} sub-subsections: {list(subsection_data.keys())}")
+                
+            # Define the report filename
+            report_filename = f"reports/teaser_{teaser_id}_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            
+            # Create the PDF document
+            doc = SimpleDocTemplate(
+                report_filename,
+                pagesize=letter,
+                rightMargin=72,
+                leftMargin=72,
+                topMargin=72,
+                bottomMargin=72
+            )
+            
+            styles = getSampleStyleSheet()
+            title_style = styles['Title']
+            heading_style = styles['Heading1']
+            subheading_style = styles['Heading2']
+            subsubheading_style = styles['Heading3']
+            normal_style = styles['Normal']
+            
+            # Make normal text slightly larger and add spacing after paragraphs
+            normal_style.fontSize = 11
+            normal_style.spaceAfter = 6
+            
+            # Container for the 'Flowable' objects
+            elements = []
+            
+            # Add the title
+            elements.append(Paragraph(f"Teaser Analysis: {teaser.filename}", title_style))
+            elements.append(Spacer(1, 12))
+            
+            # Add the date
+            elements.append(Paragraph(f"Generated on {datetime.datetime.now().strftime('%B %d, %Y')}", normal_style))
+            elements.append(Spacer(1, 24))
+            
+            # Process each section of the GPT analysis
+            for section_name, section_data in teaser.gpt_analysis.items():
+                print(f"Processing section: {section_name}")
+                
+                # Main section header
+                elements.append(Paragraph(section_name, heading_style))
+                elements.append(Spacer(1, 12))
+                
+                # Check if section_data is empty
+                if not section_data:
+                    elements.append(Paragraph("No data available for this section.", normal_style))
+                    elements.append(Spacer(1, 12))
+                    continue
+                
+                # Special handling for Teaser Summary section
+                if section_name == "Teaser Summary":
+                    print(f"  Teaser Summary contains: {list(section_data.keys())}")
+                    
+                    # Direct content or nested structure handling
+                    for subsection, content in section_data.items():
+                        print(f"    Processing subsection: {subsection}")
+                        if content:  # Only add if content exists
+                            elements.append(Paragraph(subsection, subheading_style))
+                            elements.append(Paragraph(content, normal_style))
+                            elements.append(Spacer(1, 12))
+                        else:
+                            print(f"    Skipping empty content for: {subsection}")
+                
+                # Handle nested dictionaries like Outside-In View
+                elif isinstance(section_data, dict):
+                    print(f"  Section {section_name} contains subsections: {list(section_data.keys())}")
+                    
+                    # Flag to track if any content was added in this section
+                    section_has_content = False
+                    
+                    for subsection_name, subsection_data in section_data.items():
+                        print(f"    Processing subsection: {subsection_name}")
+                        subsection_has_content = False
+                        
+                        # Add subsection header
+                        elements.append(Paragraph(subsection_name, subheading_style))
+                        elements.append(Spacer(1, 6))
+                        
+                        if isinstance(subsection_data, dict):
+                            print(f"      Subsection {subsection_name} contains: {list(subsection_data.keys())}")
+                            
+                            # Process sub-subsections
+                            for subsubsection_name, content in subsection_data.items():
+                                print(f"        Processing sub-subsection: {subsubsection_name}")
+                                if content:  # Only add if content exists
+                                    elements.append(Paragraph(subsubsection_name, subsubheading_style))
+                                    elements.append(Paragraph(str(content), normal_style))
+                                    elements.append(Spacer(1, 12))
+                                    subsection_has_content = True
+                                    section_has_content = True
+                                else:
+                                    print(f"        Skipping empty content in: {subsubsection_name}")
+                            
+                        elif subsection_data:  # Direct content in subsection
+                            elements.append(Paragraph(str(subsection_data), normal_style))
+                            elements.append(Spacer(1, 12))
+                            subsection_has_content = True
+                            section_has_content = True
+                        
+                        # If subsection had no content, add a placeholder
+                        if not subsection_has_content:
+                            elements.append(Paragraph("No data available for this subsection.", normal_style))
+                            elements.append(Spacer(1, 12))
+                    
+                    # If section had no content at all, add a clear notice
+                    if not section_has_content:
+                        elements.append(Paragraph("No analysis content available for this section.", normal_style))
+                        elements.append(Spacer(1, 12))
+                
+                # Handle direct content in the section (e.g., Context Basis items)
+                elif isinstance(section_data, dict):
+                    # Process each of the subsections (which might be direct content)
+                    for subsection_name, content in section_data.items():
+                        elements.append(Paragraph(subsection_name, subheading_style))
+                        if content:
+                            elements.append(Paragraph(str(content), normal_style))
+                        else:
+                            elements.append(Paragraph("No data available for this subsection.", normal_style))
+                        elements.append(Spacer(1, 12))
+                
+                # Handle direct content (rare case)
+                elif section_data:
+                    elements.append(Paragraph(str(section_data), normal_style))
+                    elements.append(Spacer(1, 12))
+                else:
+                    elements.append(Paragraph("No content available.", normal_style))
+                    elements.append(Spacer(1, 12))
+                
+                # Add some space after each main section
+                elements.append(Spacer(1, 24))
+            
+            # Add debug information to help troubleshoot
+            elements.append(Paragraph("Debug Information", heading_style))
+            elements.append(Paragraph(f"Total sections processed: {len(teaser.gpt_analysis)}", normal_style))
+            
+            # More detailed debug info
+            section_details = []
+            for section, data in teaser.gpt_analysis.items():
+                if isinstance(data, dict):
+                    subsections = []
+                    for subsection, subdata in data.items():
+                        if isinstance(subdata, dict):
+                            subsubsections = list(subdata.keys())
+                            subsections.append(f"{subsection} ({len(subsubsections)} items)")
+                        else:
+                            subsections.append(subsection)
+                    section_details.append(f"{section}: {', '.join(subsections)}")
+                else:
+                    section_details.append(f"{section}")
+            
+            elements.append(Paragraph(f"GPT analysis structure: {', '.join(section_details)}", normal_style))
+            
+            # Build the PDF
+            doc.build(elements)
+            
+            print(f"Generated report at {report_filename}")
+            return report_filename
+            
+        except Exception as e:
+            print(f"Error generating report: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
