@@ -25,7 +25,7 @@ class TeaserResponse(TeaserBase):
     id: int
     extracted_text: Optional[str] = None
     entities: Optional[Dict[str, List[Entity]]] = None
-    gpt_analysis: Optional[Dict[str, Any]] = None  # MECE structured analysis
+    gpt_analysis: Optional[Dict[str, Any]] = None
     status: TeaserStatus = TeaserStatus.PENDING
     report_path: Optional[str] = None
     created_at: datetime
