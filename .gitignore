@@ -28,3 +28,7 @@ dist-ssr
 .env.local
 .env.development
 .env.production
+
+# Reports
+reports/
+document_generator/reports/
