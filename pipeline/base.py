@@ -15,7 +15,6 @@ class Pipeline(ABC):
         """Execute the pipeline steps on a teaser"""
         pass
     
-    @abstractmethod
     async def _generate_report(self, teaser_id: int) -> Optional[str]:
         """Generate a report based on the processed data"""
         pass

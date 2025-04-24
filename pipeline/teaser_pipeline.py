@@ -9,7 +9,7 @@ from .base import Pipeline
 from models import Teaser, TeaserStatus
 from parser.pdf_parser import PDFParser
 from parser.nlp import NLPProcessor
-from .report_generator import ReportGenerator
+from document_generator.screening_report import generate_screening_report
 
 class TeaserProcessingPipeline(Pipeline):
     """
@@ -188,10 +188,9 @@ class TeaserProcessingPipeline(Pipeline):
                 if not self.openai_api_key:
                     print(f"Skipping GPT analysis for teaser {teaser.id} - No API key available")
             
-            # Generate the report using the ReportGenerator class
-            report_path = await ReportGenerator.generate_report(teaser)
+            # Generate the report using the generate_screening_report function
+            report_path = await generate_screening_report(teaser)
             if report_path:
-                # Update the teaser with the report path
                 teaser.report_path = report_path
                 teaser.status = TeaserStatus.COMPLETED
                 self.db.commit()
@@ -379,23 +378,3 @@ I'll now ask you to analyze specific sections of this document one by one.
             import traceback
             traceback.print_exc()
             return results
-
-    async def _generate_report(self, teaser_id: int) -> Optional[str]:
-        """
-        Generate a PDF report from the teaser GPT analysis.
-        This method is required by the abstract base class and delegates to ReportGenerator.
-        
-        Args:
-            teaser_id: The ID of the teaser to create a report for
-            
-        Returns:
-            str: Path to the generated report file, or None if generation failed
-        """
-        # Fetch the teaser from the database
-        teaser = self.db.query(Teaser).filter(Teaser.id == teaser_id).first()
-        if not teaser:
-            print(f"Teaser with ID {teaser_id} not found")
-            return None
-            
-        # Delegate report generation to the ReportGenerator
-        return await ReportGenerator.generate_report(teaser)

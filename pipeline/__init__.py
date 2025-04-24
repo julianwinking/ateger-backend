@@ -1,1 +1,1 @@
-# Pipeline package initialization
+from .teaser_pipeline import TeaserProcessingPipeline
