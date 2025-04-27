@@ -11,7 +11,7 @@ from models import TeaserStatus
 from database import get_db, engine
 from parser.pdf_parser import PDFParser
 from parser.nlp import NLPProcessor
-from pipeline.teaser_pipeline import TeaserProcessingPipeline
+from pipeline.simple_openai.teaser_pipeline import SimpleOpenAIPipeline
 
 # Load environment variables
 load_dotenv()
@@ -65,7 +65,7 @@ async def process_pdf(file_content: bytes, filename: str, db: Session):
         db.refresh(db_teaser)
         
         # Start the pipeline processing
-        pipeline = TeaserProcessingPipeline(db, nlp_processor)
+        pipeline = SimpleOpenAIPipeline(db, nlp_processor)
         await pipeline.process(db_teaser.id)
 
 @app.post("/upload", response_model=schemas.TeaserResponse)

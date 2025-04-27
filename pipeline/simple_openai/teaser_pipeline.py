@@ -5,13 +5,13 @@ import json
 import aiohttp
 import asyncio
 
-from .base import Pipeline
+from pipeline.base import Pipeline
 from models import Teaser, TeaserStatus
 from parser.pdf_parser import PDFParser
 from parser.nlp import NLPProcessor
 from document_generator.screening_report import generate_screening_report
 
-class TeaserProcessingPipeline(Pipeline):
+class SimpleOpenAIPipeline(Pipeline):
     """
     Concrete implementation of the Pipeline for processing teaser documents
     """

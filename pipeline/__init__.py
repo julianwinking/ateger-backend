@@ -1,1 +1,1 @@
-from .teaser_pipeline import TeaserProcessingPipeline
+from .simple_openai.teaser_pipeline import SimpleOpenAIPipeline
