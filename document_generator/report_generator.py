@@ -61,8 +61,8 @@ class ReportGenerator:
                     pagesize=letter,
                     rightMargin=0.75 * inch,
                     leftMargin=0.75 * inch,
-                    topMargin=0.75 * inch,
-                    bottomMargin=0.75 * inch
+                    topMargin=1.1 * inch,
+                    bottomMargin=1.1 * inch
                 )
 
                 # Create custom styles with improved spacing and formatting
@@ -94,7 +94,7 @@ class ReportGenerator:
                 elements = []
 
                 # Add the title
-                elements.append(Paragraph(f"Analysis Report: {filename}", title_style))
+                elements.append(Paragraph(f"Initial Screening Report: {filename}", title_style))
                 elements.append(Spacer(1, 12))
 
                 # Add the date
@@ -123,16 +123,17 @@ class ReportGenerator:
                 # Add a custom page template
                 def add_page_template(canvas_obj, doc_obj):
                     # Add the company logo in the upper-right corner
-                    logo_path = "backend/document_generator/images/ateger_logo_color.png"
+                    logo_path = os.path.join(os.path.dirname(__file__), "images", "ateger_logo_color.png")
                     try:
                         ImageReader(logo_path)
-                        canvas_obj.drawImage(logo_path, 450, 750, width=100, height=50, preserveAspectRatio=True, mask='auto')
+                        canvas_obj.drawImage(logo_path, 455, 725, width=100, height=50, preserveAspectRatio=True, mask='auto')
                     except Exception as e:
                         logger.warning(f"Could not add logo: {e}")
 
                     # Add page numbers in the lower-right corner
+                    canvas_obj.setFont("Helvetica", 10)
                     page_number_text = f"Page {doc_obj.page}"
-                    canvas_obj.drawRightString(550, 20, page_number_text)
+                    canvas_obj.drawRightString(555, 25, page_number_text)
 
                 # Build the PDF with the custom page template
                 logger.info("Building PDF document")
